@@ -1,4 +1,4 @@
-# Apache NiFi Architecture 
+# Apache NiFi Architecture
 
 ---
 
@@ -13,7 +13,8 @@
 7. [Data Provenance & Lineage](#7-data-provenance--lineage)
 8. [Security Architecture](#8-security-architecture)
 9. [Back-Pressure & Flow Control](#9-back-pressure--flow-control)
-10. [Best Use Cases & Project Types](#10-best-use-cases--project-types)
+10. [NiFi Registry — Version Control for Flows](#10-nifi-registry--version-control-for-flows)
+11. [Best Use Cases & Project Types](#11-best-use-cases--project-types)
 
 ---
 
@@ -60,7 +61,7 @@ mindmap
 A **FlowFile** is NiFi's fundamental data object. It has two parts:
 
 | Part | What it is | Example |
-|---|---|---|
+| --- | --- | --- |
 | **Content** | The actual bytes of data | A JSON string, a CSV row, a PDF file |
 | **Attributes** | Key-value metadata map | `filename=orders.csv`, `source=kafka`, `size=1024` |
 
@@ -69,6 +70,7 @@ The content is stored on disk (in the Content Repository). The attributes live i
 ### Processor — The Worker
 
 A Processor does one job. Examples:
+
 - `GetFile` — reads files from a directory
 - `ConvertRecord` — transforms CSV to JSON
 - `PutDatabaseRecord` — writes to a database
@@ -79,6 +81,7 @@ Each processor has **relationships** (like exit paths): `success`, `failure`, `r
 ### Connection — The Queue
 
 A Connection is a queue that sits between two processors. It:
+
 - Buffers FlowFiles when the downstream processor is busy
 - Enforces back-pressure (stops upstream when full)
 - Shows you queue depth in real-time on the canvas
@@ -130,6 +133,7 @@ graph TB
 ### Flow Engine
 
 The brain of NiFi. It:
+
 - Maintains the in-memory representation of your flow
 - Schedules processors according to their timer/cron settings
 - Manages thread pools (one per Process Group by default)
@@ -217,7 +221,7 @@ graph LR
 ### Key Scheduling Concepts
 
 | Setting | What it controls |
-|---|---|
+| --- | --- |
 | **Concurrent Tasks** | How many threads can run this processor at the same time |
 | **Run Schedule** | Timer interval (e.g., every 1s) OR cron expression |
 | **Run Duration** | How long one task can hold a thread before yielding |
@@ -272,7 +276,7 @@ graph TB
 ### Cluster Roles
 
 | Role | Description | How many |
-|---|---|---|
+| --- | --- | --- |
 | **Coordinator** | Routes requests, manages cluster state | 1 (elected by ZooKeeper) |
 | **Primary Node** | Runs processors marked "primary only" (e.g., once-per-cluster tasks) | 1 (elected by ZooKeeper) |
 | **Worker Node** | Processes data — every node is this | All nodes |
@@ -280,6 +284,7 @@ graph TB
 ### Site-to-Site (S2S) Protocol
 
 NiFi has a built-in data transfer protocol called **Site-to-Site** for moving data between NiFi instances. Unlike Kafka or HTTP, S2S:
+
 - Is NiFi-aware (respects back-pressure end-to-end)
 - Supports both push and pull modes
 - Uses efficient binary compression
@@ -389,7 +394,7 @@ graph LR
 ### Back-Pressure Settings
 
 | Setting | Default | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | **Back Pressure Object Threshold** | 10,000 | Stop upstream when queue has this many FlowFiles |
 | **Back Pressure Data Size Threshold** | 1 GB | Stop upstream when queue holds this much data |
 | **Load Balance Strategy** | Do not load balance | How to distribute FlowFiles across cluster nodes |
@@ -398,7 +403,238 @@ When back-pressure kicks in, the upstream processor is simply not scheduled. No 
 
 ---
 
-## 10. Best Use Cases & Project Types
+## 10. NiFi Registry — Version Control for Flows
+
+NiFi Registry is a **separate companion service** that gives your NiFi flows what code has always had: version control, change history, and the ability to promote flows across environments (dev → staging → prod).
+
+Think of it like **Git, but for NiFi canvas flows**.
+
+Without Registry, if you accidentally delete a processor or a teammate changes a flow that breaks production, there is no undo. With Registry, every save is a versioned snapshot you can diff, rollback, or promote.
+
+---
+
+### The Problem Registry Solves
+
+```mermaid
+graph LR
+    subgraph Without Registry
+        D1[Developer changes flow on canvas]
+        D2[Breaks production]
+        D3[No history, no rollback]
+        D1 --> D2 --> D3
+    end
+
+    subgraph With Registry
+        R1[Developer saves flow as v1]
+        R2[Makes changes - saves as v2]
+        R3[v2 breaks prod]
+        R4[One-click rollback to v1]
+        R1 --> R2 --> R3 --> R4
+    end
+```
+
+---
+
+### How Registry Fits Into the Architecture
+
+Registry is a **completely separate process** — its own JVM, its own port (default `18080`), its own storage. NiFi connects to it like a client connects to a server.
+
+```mermaid
+graph TB
+    subgraph NiFi Registry Service - port 18080
+        REG_API[REST API]
+        REG_DB[(Registry Database<br/>H2 / PostgreSQL<br/>stores flow snapshots)]
+        REG_FS[Flow Storage<br/>JSON snapshots on disk<br/>or in Git]
+        REG_API --> REG_DB
+        REG_API --> REG_FS
+    end
+
+    subgraph NiFi Cluster
+        N1[NiFi Node 1]
+        N2[NiFi Node 2]
+        N3[NiFi Node 3]
+    end
+
+    subgraph Environments
+        DEV[Dev NiFi]
+        STAGING[Staging NiFi]
+        PROD[Prod NiFi]
+    end
+
+    N1 -->|save version| REG_API
+    N2 -->|pull version| REG_API
+    DEV -->|commit v3| REG_API
+    STAGING -->|import v3| REG_API
+    PROD -->|import v3 after approval| REG_API
+```
+
+---
+
+### Core Concepts of Registry
+
+#### Bucket
+
+A **Bucket** is a top-level folder inside Registry. It groups related flows together. Think of it like a repository in GitHub.
+
+Examples:
+
+- `ETL-Pipelines` bucket
+- `IoT-Flows` bucket
+- `Finance-Ingestion` bucket
+
+Access control is set at the bucket level — some teams can only read, others can write.
+
+#### Versioned Flow
+
+A **Versioned Flow** is a named flow stored inside a bucket. Each time you save it, it creates a new immutable version (v1, v2, v3...).
+
+#### Flow Snapshot
+
+A **Snapshot** is one specific version of a flow — the complete JSON representation of every processor, connection, and configuration at that moment in time. It captures:
+
+- All processors and their properties
+- All connections and their back-pressure settings
+- Controller Services referenced by the flow
+- Parameter Contexts (variables)
+
+Sensitive properties (passwords) are **not stored** in snapshots — they must be set in the target environment.
+
+---
+
+### The Version Control Workflow
+
+```mermaid
+sequenceDiagram
+    participant Dev as Developer
+    participant NiFi as NiFi Canvas
+    participant Reg as NiFi Registry
+    participant Prod as Production NiFi
+
+    Dev->>NiFi: Right-click Process Group
+    Dev->>NiFi: "Start Version Control"
+    NiFi->>Reg: Register flow in bucket ETL-Pipelines
+    Reg-->>NiFi: Flow saved as v1
+
+    Dev->>NiFi: Modify processors
+    Dev->>NiFi: "Save New Version"
+    NiFi->>Reg: Save snapshot v2
+    Reg-->>NiFi: Confirmed
+
+    Dev->>NiFi: Discovers bug in v2
+    Dev->>NiFi: "Change Version" → select v1
+    NiFi->>Reg: Fetch snapshot v1
+    Reg-->>NiFi: Returns v1 JSON
+    NiFi->>NiFi: Reverts canvas to v1 state
+
+    Dev->>Prod: Promote v2 to production
+    Prod->>Reg: Import flow from bucket, version v2
+    Reg-->>Prod: Returns v2 snapshot
+    Prod->>Prod: Apply sensitive props manually
+```
+
+---
+
+### Flow States — What the Icons Mean
+
+On the NiFi canvas, a versioned Process Group shows a colored icon in its corner:
+
+| Icon Color | State | Meaning |
+| --- | --- | --- |
+| **Green** (checkmark) | Up to date | Canvas matches the latest Registry version |
+| **Yellow** (pencil) | Locally modified | You made changes not yet saved to Registry |
+| **Red** (X) | Stale | Registry has a newer version than what's on canvas |
+| **Gray** (question) | Sync failure | Cannot reach Registry |
+
+---
+
+### Parameter Contexts — How Env-Specific Values Work
+
+A common question: *"If Registry stores the flow, how do dev/prod use different database URLs?"*
+
+The answer is **Parameter Contexts**. Instead of hardcoding values in processors, you use parameters:
+
+```text
+Processor property: Database URL
+Value: #{db_url}          ← parameter reference, not a hardcoded value
+```
+
+Each environment has its own Parameter Context with environment-specific values:
+
+```mermaid
+graph LR
+    subgraph Registry
+        FLOW[Flow v3<br/>uses param db_url]
+    end
+
+    subgraph Dev NiFi
+        PC_DEV[Parameter Context<br/>db_url = jdbc:mysql://dev-db:3306/app]
+    end
+
+    subgraph Prod NiFi
+        PC_PROD[Parameter Context<br/>db_url = jdbc:mysql://prod-db:3306/app]
+    end
+
+    FLOW -->|same snapshot| PC_DEV
+    FLOW -->|same snapshot| PC_PROD
+```
+
+Same flow snapshot, different runtime values. This is the correct way to promote flows across environments.
+
+---
+
+### Registry Storage Backends
+
+By default Registry stores flow snapshots as JSON files on local disk. In production you should use one of:
+
+| Backend | How to configure | Best for |
+| --- | --- | --- |
+| **Local filesystem** | Default — `flow_storage_directory` | Development, single-node |
+| **Git repository** | `GitFlowPersistenceProvider` in `providers.xml` | Teams using GitOps, full audit trail in Git |
+| **Database (PostgreSQL)** | `DatabaseFlowPersistenceProvider` | HA setups, easier backup |
+
+The **Git backend** is especially powerful — every version save becomes a Git commit, giving you `git log`, `git diff`, and integration with GitHub/GitLab PR workflows.
+
+```mermaid
+graph LR
+    NiFi -->|save v4| Registry
+    Registry -->|git commit| GitRepo[(Git Repository<br/>GitHub / GitLab)]
+    GitRepo -->|PR review| Reviewer
+    Reviewer -->|merge approved| GitRepo
+    GitRepo -->|pull| ProdRegistry[Prod Registry]
+    ProdRegistry -->|import| ProdNiFi[Prod NiFi]
+```
+
+---
+
+### Registry vs Provenance — What's the Difference?
+
+People often confuse these two. They track completely different things:
+
+| | NiFi Registry | Data Provenance |
+| --- | --- | --- |
+| **Tracks** | Flow design changes (who changed what processor) | Data movement (what happened to each record) |
+| **Unit** | Flow version (the canvas blueprint) | FlowFile event (a single data record) |
+| **Who uses it** | Data engineers building pipelines | Data stewards auditing data lineage |
+| **Stored in** | Registry service (separate process) | Provenance Repository (inside NiFi) |
+| **Rollback** | Yes — revert to previous flow version | No — immutable event log |
+
+---
+
+### Quick Setup Checklist
+
+```text
+1. Start NiFi Registry service (separate docker container or process)
+2. In NiFi UI → Hamburger menu → Controller Settings → Registry Clients
+3. Add Registry Client: URL = http://registry-host:18080
+4. Right-click any Process Group on canvas → Version → Start Version Control
+5. Select bucket, give the flow a name → Save
+```
+
+From that point on, the Process Group is version-controlled. Every "Save New Version" is an immutable snapshot you can diff, rollback, or import on any other NiFi instance connected to the same Registry.
+
+---
+
+## 11. Best Use Cases & Project Types
 
 NiFi excels in specific scenarios. Here's where it shines versus where you should use something else.
 
@@ -423,6 +659,7 @@ quadrantChart
 ### Top Use Cases
 
 #### 1. Data Lake / Data Warehouse Ingestion
+
 **What:** Pull from dozens of source systems (databases, APIs, files, FTP), standardize formats, and land in S3/ADLS/GCS or Snowflake/BigQuery.
 
 **Why NiFi:** Built-in connectors for 300+ systems. Schema Registry integration for format evolution. Back-pressure protects the data lake from spikes.
@@ -439,6 +676,7 @@ graph LR
 ```
 
 #### 2. IoT & Edge Data Collection
+
 **What:** Collect sensor data from factory floors, vehicles, or field devices. Light filtering/aggregation at the edge, forward to central systems.
 
 **Why NiFi:** Site-to-Site protocol handles unreliable edge networks gracefully. MiNiFi (lightweight NiFi agent) runs on small devices. Central NiFi pulls from edge agents.
@@ -464,21 +702,25 @@ graph LR
 ```
 
 #### 3. Security Operations / SIEM Feeding
+
 **What:** Aggregate logs and security events from firewalls, IDS/IPS, endpoints, and cloud services. Normalize formats (Syslog, CEF, LEEF) and feed a SIEM.
 
 **Why NiFi:** NSA origin means excellent security capabilities. Provenance gives a tamper-evident audit trail. Sensitive data masking processors built-in.
 
 #### 4. Change Data Capture (CDC) Pipelines
+
 **What:** Capture row-level changes from relational databases and stream them to a downstream system in near real-time.
 
 **Why NiFi:** `QueryDatabaseTable` and `CaptureChangeMySQL`/`CaptureChangeMSSQL` processors handle CDC natively. Works well with Debezium as a source.
 
 #### 5. Healthcare / HL7 Data Integration
+
 **What:** Route HL7 messages between hospital systems (EHR, labs, pharmacy). Transform between HL7 v2, FHIR R4, and other formats.
 
 **Why NiFi:** Dedicated HL7 processors. HIPAA-compliant security model. Proven in production at major health systems.
 
 #### 6. Multi-System Data Synchronization
+
 **What:** Keep data in sync across multiple systems — CRM to data warehouse to analytics platform.
 
 **Why NiFi:** Event-driven routing, attribute-based decision making, and retry logic make bidirectional sync manageable.
@@ -488,7 +730,7 @@ graph LR
 ### When NOT to Use NiFi
 
 | Scenario | Better Choice |
-|---|---|
+| --- | --- |
 | Sub-second streaming aggregations | Apache Flink or Kafka Streams |
 | Complex batch orchestration with dependencies | Apache Airflow or Prefect |
 | Simple one-off file transfers | Shell scripts or cloud-native tools |
@@ -500,7 +742,7 @@ graph LR
 ### Most Common Project Types in the Wild
 
 | Project Type | Stack | NiFi's Role |
-|---|---|---|
+| --- | --- | --- |
 | **Modern Data Platform** | NiFi + Kafka + Spark + Delta Lake | Ingestion layer, raw landing |
 | **Operational Data Store** | NiFi + PostgreSQL + Elasticsearch | ETL + search indexing |
 | **Real-Time Dashboard** | NiFi + Kafka + ClickHouse + Grafana | Collection + enrichment |
@@ -514,7 +756,7 @@ graph LR
 ## Quick Reference: Repository Paths
 
 | Repository | Default Path | Tuning Tip |
-|---|---|---|
+| --- | --- | --- |
 | FlowFile Repository | `./flowfile_repository` | Put on fast SSD, separate disk from content |
 | Content Repository | `./content_repository` | Can span multiple disks with multiple paths |
 | Provenance Repository | `./provenance_repository` | Most I/O intensive — dedicate a disk |
