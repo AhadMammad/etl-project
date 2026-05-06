@@ -1,0 +1,42 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Docker volumes / runtime data
+data/
+volumes/
+mysql/data/
+minio/data/
+nifi/data/
+nifi/logs/
+nifi/conf/
+nifi/flowfile_repository/
+nifi/content_repository/
+nifi/provenance_repository/
+nifi/state/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+.pytest_cache/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/

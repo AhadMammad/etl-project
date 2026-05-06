@@ -1,0 +1,126 @@
+services:
+
+  # ── MySQL ──────────────────────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: etl_mysql
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── Apache NiFi ────────────────────────────────────────────────────────────
+  nifi:
+    build:
+      context: ./nifi
+      dockerfile: Dockerfile
+    container_name: etl_nifi
+    restart: unless-stopped
+    ports:
+      - "${NIFI_PORT}:8080"
+    environment:
+      - NIFI_WEB_HTTP_PORT=8080
+      - NIFI_WEB_HTTP_HOST=0.0.0.0
+      - SINGLE_USER_CREDENTIALS_USERNAME=
+      - SINGLE_USER_CREDENTIALS_PASSWORD=
+      - MINIO_HOST=minio
+      - MINIO_PORT=9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - MINIO_BUCKET=${MINIO_BUCKET}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - nifi_conf:/opt/nifi/nifi-current/conf
+      - nifi_state:/opt/nifi/nifi-current/state
+      - nifi_logs:/opt/nifi/nifi-current/logs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/nifi-api/system-diagnostics > /dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+
+  # ── MinIO ──────────────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:ahad
+    pull_policy: never
+    container_name: etl_minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ── MinIO bucket setup (one-shot) ──────────────────────────────────────────
+  minio-setup:
+    image: minio/minio:ahad
+    pull_policy: never
+    container_name: etl_minio_setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+    volumes:
+      - ./minio/create-bucket.sh:/create-bucket.sh:ro
+    entrypoint: ["/bin/sh", "/create-bucket.sh"]
+    restart: "no"
+
+  # ── NiFi flow provisioning (one-shot, triggered via `make setup`) ──────────
+  nifi-setup:
+    image: python:3.11-slim
+    container_name: etl_nifi_setup
+    depends_on:
+      nifi:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      NIFI_BASE_URL: http://nifi:8080/nifi-api
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MINIO_HOST: minio
+      MINIO_PORT: "9000"
+    volumes:
+      - ./scripts/setup_nifi_flow.py:/setup_nifi_flow.py:ro
+    command: >
+      sh -c "pip install requests -q && python /setup_nifi_flow.py"
+    profiles:
+      - setup
+    restart: "no"
+
+volumes:
+  mysql_data:
+  minio_data:
+  nifi_conf:
+  nifi_state:
+  nifi_logs:
