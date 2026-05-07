@@ -1,6 +1,12 @@
 COMPOSE := docker compose
 SERVICE ?=
 
+# Load .env so variables like MINIO_BUCKET are visible to make targets
+ifneq (,$(wildcard .env))
+include .env
+export
+endif
+
 # ANSI color codes
 BOLD   := \033[1m
 RESET  := \033[0m
@@ -11,7 +17,11 @@ RED    := \033[0;31m
 BLUE   := \033[0;34m
 DIM    := \033[2m
 
-.PHONY: up setup run down clean clean-all logs status ps help
+.PHONY: up setup run down clean clean-all logs status ps help \
+        duck duck-shell duck-ls duck-query duck-show duck-count duck-schema
+
+DUCK_EXEC := $(COMPOSE) exec -T duckdb duckdb -init /workspace/init.sql
+DUCK_BUCKET := $(or $(MINIO_BUCKET),etl-data)
 
 ## Build images and start MySQL, MinIO, NiFi in detached mode
 up:
@@ -66,6 +76,36 @@ status:
 ## Alias for status
 ps: status
 
+## Open an interactive DuckDB shell with MinIO/S3 preconfigured
+duck duck-shell:
+	@printf "$(CYAN)$(BOLD)Opening DuckDB shell (.quit to exit)...$(RESET)\n"
+	$(COMPOSE) exec duckdb duckdb -init /workspace/init.sql
+
+## List parquet files in s3://$(MINIO_BUCKET)
+duck-ls:
+	@printf "$(CYAN)Listing parquet files in s3://$(DUCK_BUCKET) ...$(RESET)\n"
+	@$(DUCK_EXEC) -c "SELECT DISTINCT filename FROM read_parquet('s3://$(DUCK_BUCKET)/**/*.parquet', filename=true) ORDER BY filename;"
+
+## Run an ad-hoc SQL query. Usage: make duck-query Q="SELECT 1"
+duck-query:
+	@if [ -z "$(Q)" ]; then printf "$(RED)Usage: make duck-query Q=\"SELECT ...\"$(RESET)\n"; exit 1; fi
+	@echo "$(Q)" | $(DUCK_EXEC)
+
+## Preview a parquet file. Usage: make duck-show FILE=path/in/bucket.parquet [LIMIT=20]
+duck-show:
+	@if [ -z "$(FILE)" ]; then printf "$(RED)Usage: make duck-show FILE=path/in/bucket.parquet [LIMIT=20]$(RESET)\n"; exit 1; fi
+	@$(DUCK_EXEC) -c "SELECT * FROM read_parquet('s3://$(DUCK_BUCKET)/$(FILE)') LIMIT $(or $(LIMIT),20);"
+
+## Count rows in a parquet file. Usage: make duck-count FILE=path/in/bucket.parquet
+duck-count:
+	@if [ -z "$(FILE)" ]; then printf "$(RED)Usage: make duck-count FILE=path/in/bucket.parquet$(RESET)\n"; exit 1; fi
+	@$(DUCK_EXEC) -c "SELECT COUNT(*) AS rows FROM read_parquet('s3://$(DUCK_BUCKET)/$(FILE)');"
+
+## Describe schema of a parquet file. Usage: make duck-schema FILE=path/in/bucket.parquet
+duck-schema:
+	@if [ -z "$(FILE)" ]; then printf "$(RED)Usage: make duck-schema FILE=path/in/bucket.parquet$(RESET)\n"; exit 1; fi
+	@$(DUCK_EXEC) -c "DESCRIBE SELECT * FROM read_parquet('s3://$(DUCK_BUCKET)/$(FILE)');"
+
 ## Show this help message
 help:
 	@echo ""
@@ -84,6 +124,14 @@ help:
 	@printf "  $(CYAN)status$(RESET)   Show container health and status\n"
 	@printf "  $(CYAN)ps$(RESET)       Alias for status\n"
 	@printf "  $(CYAN)help$(RESET)     Show this help message\n"
+	@echo ""
+	@printf "$(BOLD)DuckDB:$(RESET)\n"
+	@printf "  $(CYAN)duck$(RESET) / $(CYAN)duck-shell$(RESET)  Open interactive DuckDB shell (S3/MinIO preconfigured)\n"
+	@printf "  $(CYAN)duck-ls$(RESET)             List parquet files in s3://$(DUCK_BUCKET)\n"
+	@printf "  $(CYAN)duck-query$(RESET)          Run SQL  $(DIM)|  make duck-query Q=\"SELECT 1\"$(RESET)\n"
+	@printf "  $(CYAN)duck-show$(RESET)           Preview rows  $(DIM)|  make duck-show FILE=path.parquet [LIMIT=20]$(RESET)\n"
+	@printf "  $(CYAN)duck-count$(RESET)          Count rows  $(DIM)|  make duck-count FILE=path.parquet$(RESET)\n"
+	@printf "  $(CYAN)duck-schema$(RESET)         Describe schema  $(DIM)|  make duck-schema FILE=path.parquet$(RESET)\n"
 	@echo ""
 	@printf "$(BOLD)Endpoints:$(RESET)\n"
 	@printf "  $(GREEN)NiFi Canvas$(RESET)   http://localhost:8080/nifi  $(DIM)(no credentials)$(RESET)\n"

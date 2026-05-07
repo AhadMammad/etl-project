@@ -58,7 +58,7 @@ services:
 
   # ── MinIO ──────────────────────────────────────────────────────────────────
   minio:
-    image: minio/minio:ahad
+    image: quay.io/minio/minio:latest
     pull_policy: never
     container_name: etl_minio
     restart: unless-stopped
@@ -80,7 +80,7 @@ services:
 
   # ── MinIO bucket setup (one-shot) ──────────────────────────────────────────
   minio-setup:
-    image: minio/minio:ahad
+    image: quay.io/minio/minio:latest
     pull_policy: never
     container_name: etl_minio_setup
     depends_on:
@@ -95,6 +95,26 @@ services:
       - ./minio/create-bucket.sh:/create-bucket.sh:ro
     entrypoint: ["/bin/sh", "/create-bucket.sh"]
     restart: "no"
+
+  # ── DuckDB ─────────────────────────────────────────────────────────────────
+  duckdb:
+    build:
+      context: ./duckdb
+      dockerfile: Dockerfile
+    container_name: etl_duckdb
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MINIO_HOST: minio
+      MINIO_PORT: "9000"
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - duckdb_data:/workspace
 
   # ── NiFi flow provisioning (one-shot, triggered via `make setup`) ──────────
   nifi-setup:
@@ -124,3 +144,4 @@ volumes:
   nifi_conf:
   nifi_state:
   nifi_logs:
+  duckdb_data:
